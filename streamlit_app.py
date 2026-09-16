@@ -98,7 +98,7 @@ with tab2:
         st.dataframe(df_active.sort_values(by="Date", ascending=False))
     else:
         st.info("No data logged yet. Upload your first receipt in the other tab!")
-   st.error(f"An unexpected tracking error occurred: {e}")
+        st.error(f"An unexpected tracking error occurred: {e}")
 
 with tab2:
     st.header("Analyze Past Groceries")
