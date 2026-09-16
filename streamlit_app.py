@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 import json
 import os
 
@@ -24,6 +25,15 @@ if os.path.exists(DB_FILE):
 else:
     df_history = pd.DataFrame(columns=["Date", "Item", "Quantity", "Price"])
 
+# Define the structure for Structured Outputs
+class GroceryItem(BaseModel):
+    Item: str = Field(description="The clean name of the grocery item")
+    Quantity: int = Field(description="The quantity bought, default to 1 if not clear")
+    Price: float = Field(description="The total price paid for this item")
+
+class ReceiptData(BaseModel):
+    items: list[GroceryItem]
+
 st.title("🛒 Smart Grocery Tracker & Price Comparator")
 
 tab1, tab2 = st.tabs(["Scan New Receipt", "History & Price Comparison"])
@@ -36,41 +46,52 @@ with tab1:
     if uploaded_file is not None:
         st.image(uploaded_file, caption="Uploaded Receipt", use_container_width=True)
         
+        # 1. FIXED: We use the button to control the parsing logic cleanly
         if st.button("Extract & Save Items"):
             with st.spinner("Gemini is reading your receipt..."):
                 bytes_data = uploaded_file.getvalue()
                 
-                # Prompt Gemini to return clean, structured data
-                prompt = """
-                Analyze this grocery receipt image. Extract all items purchased. 
-                For each item, identify the item name, quantity, and total price paid.
-                Return the data strictly as a JSON array of objects with the keys: 
-                "Item", "Quantity", "Price". Do not include markdown formatting tags.
-                """
-                
-                response = client.models.generate_content(
-                    model='gemini-2.5-flash',
-                    contents=[
-                        types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
-                        prompt
-                    ]
-                )
+                # Prompt Gemini to extract details
+                prompt = "Analyze this grocery receipt image. Extract all items purchased including item name, quantity, and total price paid."
                 
                 try:
-                    # Parse extracted text to JSON and save to database
-                    items = json.loads(response.text)
-                    new_records = pd.DataFrame(items)
-                    new_records["Date"] = str(purchase_date)
+                    # 2. FIXED: Use config to enforce native JSON object matching our Pydantic schema
+                    response = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=[
+                            types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
+                            prompt
+                        ],
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=ReceiptData,
+                        ),
+                    )
                     
-                    # Consolidate and save
-                    df_history = pd.concat([df_history, new_records], ignore_index=True)
-                    df_history.to_csv(DB_FILE, index=False)
+                    # 3. Parse structured schema output
+                    result_json = json.loads(response.text)
+                    items_list = result_json.get("items", [])
                     
-                    st.success(f"Successfully added {len(new_records)} items to history!")
-                    st.dataframe(new_records)
+                    if items_list:
+                        new_records = pd.DataFrame(items_list)
+                        new_records["Date"] = str(purchase_date)
+                        
+                        # Consolidate and save
+                        df_history = pd.concat([df_history, new_records], ignore_index=True)
+                        df_history.to_csv(DB_FILE, index=False)
+                        
+                        st.success(f"Successfully added {len(new_records)} items to history!")
+                        st.dataframe(new_records)
+                        
+                        # Rerun app state to update the history tab seamlessly
+                        st.rerun()
+                    else:
+                        st.warning("No items were found on the receipt text.")
+                        
                 except Exception as e:
-                    st.error("Failed to parse receipt data. Please check the API response.")
-                    st.text(response.text)
+                    st.error(f"Failed to parse receipt data: {e}")
+                    if 'response' in locals() and response.text:
+                        st.text(response.text)
 
 with tab2:
     st.header("Analyze Past Groceries")
@@ -93,4 +114,4 @@ with tab2:
         st.dataframe(df_history.sort_values(by="Date", ascending=False))
     else:
         st.info("No data logged yet. Upload your first receipt in the other tab!")
-      
+        
