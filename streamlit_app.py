@@ -46,18 +46,16 @@ with tab1:
     if uploaded_file is not None:
         st.image(uploaded_file, caption="Uploaded Receipt", use_container_width=True)
         
-        # 1. FIXED: We use the button to control the parsing logic cleanly
         if st.button("Extract & Save Items"):
             with st.spinner("Gemini is reading your receipt..."):
                 bytes_data = uploaded_file.getvalue()
                 
-                # Prompt Gemini to extract details
                 prompt = "Analyze this grocery receipt image. Extract all items purchased including item name, quantity, and total price paid."
                 
                 try:
-                    # 2. FIXED: Use config to enforce native JSON object matching our Pydantic schema
+                    # UPDATED: Changed model to 'gemini-3.6-flash'
                     response = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.6-flash',
                         contents=[
                             types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
                             prompt
@@ -68,7 +66,6 @@ with tab1:
                         ),
                     )
                     
-                    # 3. Parse structured schema output
                     result_json = json.loads(response.text)
                     items_list = result_json.get("items", [])
                     
@@ -76,14 +73,12 @@ with tab1:
                         new_records = pd.DataFrame(items_list)
                         new_records["Date"] = str(purchase_date)
                         
-                        # Consolidate and save
                         df_history = pd.concat([df_history, new_records], ignore_index=True)
                         df_history.to_csv(DB_FILE, index=False)
                         
                         st.success(f"Successfully added {len(new_records)} items to history!")
                         st.dataframe(new_records)
                         
-                        # Rerun app state to update the history tab seamlessly
                         st.rerun()
                     else:
                         st.warning("No items were found on the receipt text.")
@@ -96,14 +91,12 @@ with tab1:
 with tab2:
     st.header("Analyze Past Groceries")
     if not df_history.empty:
-        # Search & Filter
         search_item = st.text_input("Search for a specific item to compare prices (e.g., Milk):")
         
         if search_item:
             filtered_df = df_history[df_history['Item'].str.contains(search_item, case=False, na=False)]
             if not filtered_df.empty:
                 st.write(f"Price history for '{search_item}':")
-                # Plot price over time
                 fig = px.line(filtered_df, x="Date", y="Price", text="Quantity", title=f"Price Trend: {search_item}")
                 st.plotly_chart(fig)
                 st.dataframe(filtered_df)
