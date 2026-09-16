@@ -178,7 +178,7 @@ with tab2:
         st.dataframe(df_active.sort_values(by="Date", ascending=False))
     else:
         st.info("No data logged yet. Upload your first receipt in the other tab!")
-                    response = client.models.generate_content(
+                response = client.models.generate_content(
                         model='gemini-2.5-flash',
                         contents=[
                             types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
