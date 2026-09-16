@@ -19,10 +19,9 @@ client = genai.Client(api_key=api_key)
 
 DB_FILE = "grocery_history.csv"
 
-# Load or initialize database with the new Store column
+# Load or initialize database with the Store column
 if os.path.exists(DB_FILE):
     df_history = pd.read_csv(DB_FILE)
-    # Automatically add column if old database exists without it
     if "Store" not in df_history.columns:
         df_history["Store"] = "Unknown"
 else:
@@ -34,9 +33,8 @@ class GroceryItem(BaseModel):
     Quantity: int = Field(description="The quantity bought, default to 1 if not clear")
     Price: float = Field(description="The total price paid for this item")
 
-# UPDATED: Added store_name field to root structure
 class ReceiptData(BaseModel):
-    store_name: str = Field(description="The name of the store or supermarket from the receipt header")
+    store_name: str = Field(description="The name of the store or supermarket from the receipt header, or leave empty if not found")
     items: list[GroceryItem]
 
 st.title("🛒 Smart Grocery Tracker & Price Comparator")
@@ -46,72 +44,102 @@ tab1, tab2 = st.tabs(["Scan New Receipt", "History & Price Comparison"])
 with tab1:
     st.header("Upload Receipt")
     uploaded_file = st.file_uploader("Choose a receipt image...", type=["jpg", "jpeg", "png"])
-    purchase_date = st.date_input("Date of purchase")
+    
+    # Organize entry selectors cleanly using layout columns
+    col1, col2 = st.columns(2)
+    with col1:
+        purchase_date = st.date_input("Date of purchase")
+    with col2:
+        # ADDED: Checkbox toggle for manual entry selection
+        manual_store_toggle = st.checkbox("Manually enter/select store name")
+        
+        final_manual_store = ""
+        if manual_store_toggle:
+            # Get sorted unique list of previously saved stores from history
+            existing_stores = sorted(df_history["Store"].dropna().unique().tolist())
+            if "Unknown" in existing_stores:
+                existing_stores.remove("Unknown")
+            
+            # Create dropdown options array with custom addition choice at index 0
+            dropdown_options = ["➕ Add New Store..."] + existing_stores
+            
+            selected_option = st.selectbox("Select Store", options=dropdown_options)
+            
+            # If they choose to type a new store, show a text field
+            if selected_option == "➕ Add New Store...":
+                new_store_input = st.text_input("Type New Store Name", placeholder="e.g., Walmart, Costco")
+                final_manual_store = new_store_input.strip()
+            else:
+                final_manual_store = selected_option
 
     if uploaded_file is not None:
         st.image(uploaded_file, caption="Uploaded Receipt", use_container_width=True)
         
         if st.button("Extract & Save Items"):
-            with st.spinner("Gemini is reading your receipt..."):
-                bytes_data = uploaded_file.getvalue()
-                
-                # UPDATED: Prompt updated to ask for store name mapping
-                prompt = "Analyze this grocery receipt image. Extract the name of the store, and all items purchased including item name, quantity, and total price paid."
-                
-                try:
-                    response = client.models.generate_content(
-                        model='gemini-3.6-flash',
-                        contents=[
-                            types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
-                            prompt
-                        ],
-                        config=types.GenerateContentConfig(
-                            response_mime_type="application/json",
-                            response_schema=ReceiptData,
-                        ),
-                    )
+            # Validation logic checking manual option requirements
+            if manual_store_toggle and not final_manual_store:
+                st.error("Please select an existing store or type a new store name before scanning.")
+            else:
+                with st.spinner("Gemini is reading your receipt..."):
+                    bytes_data = uploaded_file.getvalue()
                     
-                    result_json = json.loads(response.text)
-                    extracted_store = result_json.get("store_name", "Unknown Store")
-                    items_list = result_json.get("items", [])
+                    prompt = "Analyze this grocery receipt image. Extract all items purchased including item name, quantity, and total price paid."
+                    if not manual_store_toggle:
+                        prompt += " Also extract the name of the store from the header."
                     
-                    if items_list:
-                        new_records = pd.DataFrame(items_list)
-                        # UPDATED: Tag records with both Date and Store metadata
-                        new_records["Date"] = str(purchase_date)
-                        new_records["Store"] = extracted_store
+                    try:
+                        response = client.models.generate_content(
+                            model='gemini-3.6-flash',
+                            contents=[
+                                types.Part.from_bytes(data=bytes_data, mime_type=uploaded_file.type),
+                                prompt
+                            ],
+                            config=types.GenerateContentConfig(
+                                response_mime_type="application/json",
+                                response_schema=ReceiptData,
+                            ),
+                        )
                         
-                        # Reorder columns for a clean view
-                        new_records = new_records[["Date", "Store", "Item", "Quantity", "Price"]]
+                        result_json = json.loads(response.text)
+                        items_list = result_json.get("items", [])
                         
-                        # Consolidate and save
-                        df_history = pd.concat([df_history, new_records], ignore_index=True)
-                        df_history.to_csv(DB_FILE, index=False)
+                        # Use manual selection or let Gemini figure it out
+                        if manual_store_toggle:
+                            final_store = final_manual_store
+                        else:
+                            final_store = result_json.get("store_name", "Unknown Store")
                         
-                        st.success(f"Successfully added {len(new_records)} items from **{extracted_store}** to history!")
-                        st.dataframe(new_records)
-                        
-                        st.rerun()
-                    else:
-                        st.warning("No items were found on the receipt text.")
-                        
-                except Exception as e:
-                    st.error(f"Failed to parse receipt data: {e}")
-                    if 'response' in locals() and response.text:
-                        st.text(response.text)
+                        if items_list:
+                            new_records = pd.DataFrame(items_list)
+                            new_records["Date"] = str(purchase_date)
+                            new_records["Store"] = final_store
+                            
+                            new_records = new_records[["Date", "Store", "Item", "Quantity", "Price"]]
+                            
+                            df_history = pd.concat([df_history, new_records], ignore_index=True)
+                            df_history.to_csv(DB_FILE, index=False)
+                            
+                            st.success(f"Successfully added {len(new_records)} items from **{final_store}** to history!")
+                            st.dataframe(new_records)
+                            
+                            st.rerun()
+                        else:
+                            st.warning("No items were found on the receipt text.")
+                            
+                    except Exception as e:
+                        st.error(f"Failed to parse receipt data: {e}")
+                        if 'response' in locals() and response.text:
+                            st.text(response.text)
 
 with tab2:
     st.header("Analyze Past Groceries")
     if not df_history.empty:
-        # Search & Filter
         search_item = st.text_input("Search for a specific item to compare prices (e.g., Milk):")
         
         if search_item:
             filtered_df = df_history[df_history['Item'].str.contains(search_item, case=False, na=False)]
             if not filtered_df.empty:
                 st.write(f"Price history for '{search_item}':")
-                
-                # UPDATED: Color code the line chart by Store to visually contrast pricing changes
                 fig = px.line(
                     filtered_df, 
                     x="Date", 
