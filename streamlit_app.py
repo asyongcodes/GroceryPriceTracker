@@ -19,11 +19,14 @@ client = genai.Client(api_key=api_key)
 
 DB_FILE = "grocery_history.csv"
 
-# Load or initialize database
+# Load or initialize database with the new Store column
 if os.path.exists(DB_FILE):
     df_history = pd.read_csv(DB_FILE)
+    # Automatically add column if old database exists without it
+    if "Store" not in df_history.columns:
+        df_history["Store"] = "Unknown"
 else:
-    df_history = pd.DataFrame(columns=["Date", "Item", "Quantity", "Price"])
+    df_history = pd.DataFrame(columns=["Date", "Store", "Item", "Quantity", "Price"])
 
 # Define the structure for Structured Outputs
 class GroceryItem(BaseModel):
@@ -31,7 +34,9 @@ class GroceryItem(BaseModel):
     Quantity: int = Field(description="The quantity bought, default to 1 if not clear")
     Price: float = Field(description="The total price paid for this item")
 
+# UPDATED: Added store_name field to root structure
 class ReceiptData(BaseModel):
+    store_name: str = Field(description="The name of the store or supermarket from the receipt header")
     items: list[GroceryItem]
 
 st.title("🛒 Smart Grocery Tracker & Price Comparator")
@@ -50,10 +55,10 @@ with tab1:
             with st.spinner("Gemini is reading your receipt..."):
                 bytes_data = uploaded_file.getvalue()
                 
-                prompt = "Analyze this grocery receipt image. Extract all items purchased including item name, quantity, and total price paid."
+                # UPDATED: Prompt updated to ask for store name mapping
+                prompt = "Analyze this grocery receipt image. Extract the name of the store, and all items purchased including item name, quantity, and total price paid."
                 
                 try:
-                    # UPDATED: Changed model to 'gemini-3.6-flash'
                     response = client.models.generate_content(
                         model='gemini-3.6-flash',
                         contents=[
@@ -67,16 +72,23 @@ with tab1:
                     )
                     
                     result_json = json.loads(response.text)
+                    extracted_store = result_json.get("store_name", "Unknown Store")
                     items_list = result_json.get("items", [])
                     
                     if items_list:
                         new_records = pd.DataFrame(items_list)
+                        # UPDATED: Tag records with both Date and Store metadata
                         new_records["Date"] = str(purchase_date)
+                        new_records["Store"] = extracted_store
                         
+                        # Reorder columns for a clean view
+                        new_records = new_records[["Date", "Store", "Item", "Quantity", "Price"]]
+                        
+                        # Consolidate and save
                         df_history = pd.concat([df_history, new_records], ignore_index=True)
                         df_history.to_csv(DB_FILE, index=False)
                         
-                        st.success(f"Successfully added {len(new_records)} items to history!")
+                        st.success(f"Successfully added {len(new_records)} items from **{extracted_store}** to history!")
                         st.dataframe(new_records)
                         
                         st.rerun()
@@ -91,13 +103,23 @@ with tab1:
 with tab2:
     st.header("Analyze Past Groceries")
     if not df_history.empty:
+        # Search & Filter
         search_item = st.text_input("Search for a specific item to compare prices (e.g., Milk):")
         
         if search_item:
             filtered_df = df_history[df_history['Item'].str.contains(search_item, case=False, na=False)]
             if not filtered_df.empty:
                 st.write(f"Price history for '{search_item}':")
-                fig = px.line(filtered_df, x="Date", y="Price", text="Quantity", title=f"Price Trend: {search_item}")
+                
+                # UPDATED: Color code the line chart by Store to visually contrast pricing changes
+                fig = px.line(
+                    filtered_df, 
+                    x="Date", 
+                    y="Price", 
+                    color="Store", 
+                    text="Quantity", 
+                    title=f"Price Trend by Store: {search_item}"
+                )
                 st.plotly_chart(fig)
                 st.dataframe(filtered_df)
             else:
